@@ -71,7 +71,7 @@ message(STATUS "CSOUND_AC_ENABLE_NOTARIZATION: ${CSOUND_AC_ENABLE_NOTARIZATION}"
 message(STATUS "CSOUND_VST3_EMBED_CSOUND_FRAMEWORK: ${CSOUND_VST3_EMBED_CSOUND_FRAMEWORK}")
 message(STATUS "CSOUND_VST3_MACOS_POSTBUILD_ADHOC_SIGN: ${CSOUND_VST3_MACOS_POSTBUILD_ADHOC_SIGN}")
 
-message(STATUS "Refreshing FindCsoundHomeFirst.cmake from csound-ac (csound_threaded.hpp is fetched at build time)...")
+message(STATUS "Refreshing FindCsoundHomeFirst.cmake from csound-ac (csound_threaded.hpp is downloaded from GitHub head at build time)...")
 
 file(MAKE_DIRECTORY "${CSOUND_VST3_SOURCE_DIR}/cmake")
 
@@ -181,18 +181,22 @@ target_include_directories(CsoundVST3 PRIVATE
     ${CSOUND_INCLUDE_DIRS}
 )
 
-# Every build: pull CsoundAC/csound_threaded.hpp (not Csound SDK). Source/ is listed before CSOUND_INCLUDE_DIRS
-# so this file wins over any installed csound_threaded.hpp. Download failure is WARNING only (see script).
+# Every build: download CsoundAC/csound_threaded.hpp (not Csound SDK) from
+# GitHub csound-ac head before compiling. Source/ is listed before
+# CSOUND_INCLUDE_DIRS so this file wins over any installed csound_threaded.hpp.
 set(CSOUND_AC_CSOUND_THREADED_URL
     "https://raw.githubusercontent.com/gogins-dev/csound-ac/refs/heads/master/CsoundAC/csound_threaded.hpp"
 )
 set(CSOUND_AC_CSOUND_THREADED_DST "${CSOUND_VST3_SOURCE_DIR}/Source/csound_threaded.hpp")
+# Single -D arguments avoid Ninja/VERBATIM edge cases with empty or quoted URLs for cmake -P.
+string(CONCAT _csound_threaded_url_arg "-DURL=" "${CSOUND_AC_CSOUND_THREADED_URL}")
+string(CONCAT _csound_threaded_dst_arg "-DDST=" "${CSOUND_AC_CSOUND_THREADED_DST}")
 add_custom_target(csound_ac_fetch_csound_threaded
     COMMAND "${CMAKE_COMMAND}"
-        -DURL="${CSOUND_AC_CSOUND_THREADED_URL}"
-        -DDST="${CSOUND_AC_CSOUND_THREADED_DST}"
+        "${_csound_threaded_url_arg}"
+        "${_csound_threaded_dst_arg}"
         -P "${CSOUND_VST3_SOURCE_DIR}/cmake/FetchCsoundACCsoundThreaded.cmake"
-    COMMENT "Download csound-ac CsoundAC/csound_threaded.hpp"
+    COMMENT "Download csound-ac CsoundAC/csound_threaded.hpp from GitHub head"
     VERBATIM
 )
 foreach(_csound_ac_fetch_t IN ITEMS CsoundVST3 CsoundVST3_VST3 CsoundVST3_AU CsoundVST3_Standalone)

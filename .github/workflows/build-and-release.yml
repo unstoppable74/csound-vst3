@@ -41,12 +41,13 @@ jobs:
             build_dir: build-linux
             csound_install: /tmp/csound-install
             archive_glob: build-linux/csound-vst3-*-linux.zip
-          - name: Windows
-            os: windows-2022
-            platform_name: windows
-            build_dir: build-windows
-            csound_install: C:/csound-install
-            archive_glob: build-windows/csound-vst3-*-windows.zip
+          # Windows build is temporarily disabled, but kept here for re-enabling.
+          # - name: Windows
+          #   os: windows-2022
+          #   platform_name: windows
+          #   build_dir: build-windows
+          #   csound_install: C:/csound-install
+          #   archive_glob: build-windows/csound-vst3-*-windows.zip
 
     steps:
       - name: Check out csound-vst3

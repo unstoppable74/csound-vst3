@@ -119,6 +119,41 @@ message(STATUS "Using Csound library:       ${CSOUND_LIBRARY}")
 message(STATUS "Using Csound include dirs:  ${CSOUND_INCLUDE_DIRS}")
 message(STATUS "Using Csound framework dir: ${CSOUND_FRAMEWORK_DIR}")
 message(STATUS "Using Csound version:       ${CSOUND_VERSION}")
+# ── Fallback: detect Csound major/minor from version.h ──
+# FindCsoundHomeFirst.cmake tries to run csound --version; on some CI
+# runners this may fail.  As a safety net, read CS_VERSION / CS_SUBVER
+# directly from the installed headers when the finder left them unset.
+if(NOT CSOUND_VERSION_MAJOR OR CSOUND_VERSION_MAJOR STREQUAL "" OR CSOUND_VERSION_MAJOR EQUAL 0)
+    foreach(_vhdr
+        "${CSOUND_INCLUDE_DIR}/csound/version.h"
+        "${CSOUND_INCLUDE_DIR}/version.h"
+    )
+        if(EXISTS "${_vhdr}")
+            file(READ "${_vhdr}" _vhdr_content)
+            if(_vhdr_content MATCHES "#[ \t]*define[ \t]+CS_VERSION[ \t]+\\(([0-9]+)\\)")
+                set(CSOUND_VERSION_MAJOR "${CMAKE_MATCH_1}")
+                message(STATUS "Fallback: CSOUND_VERSION_MAJOR = ${CSOUND_VERSION_MAJOR} (from ${_vhdr})")
+            endif()
+            if(_vhdr_content MATCHES "#[ \t]*define[ \t]+CS_SUBVER[ \t]+\\(([0-9]+)\\)")
+                set(CSOUND_VERSION_MINOR "${CMAKE_MATCH_1}")
+                message(STATUS "Fallback: CSOUND_VERSION_MINOR = ${CSOUND_VERSION_MINOR} (from ${_vhdr})")
+            endif()
+            break()
+        endif()
+    endforeach()
+endif()
+
+if(NOT CSOUND_VERSION_MAJOR OR CSOUND_VERSION_MAJOR STREQUAL "")
+    message(FATAL_ERROR
+        "Cannot determine CSOUND_VERSION_MAJOR. "
+        "Set -DCSOUND_VERSION_MAJOR=7 manually or check your Csound installation.")
+endif()
+
+# Keep CSOUND_VERSION in sync
+if(NOT CSOUND_VERSION OR CSOUND_VERSION STREQUAL "")
+    set(CSOUND_VERSION "${CSOUND_VERSION_MAJOR}.${CSOUND_VERSION_MINOR}")
+    message(STATUS "Computed CSOUND_VERSION = ${CSOUND_VERSION}")
+endif()
 
 set(JUCE_ROOT
     "${CSOUND_VST3_REPOSITORY_ROOT}/include/JUCE"

@@ -37,13 +37,11 @@ jobs:
       CSOUND_INSTALL_PREFIX: ${{ github.workspace }}/.cache/csound-install
 
     steps:
-      # ── Step 1: Checkout ──
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # ── Step 2: Detect VS ──
       - name: Detect Visual Studio generator
         id: detect-vs
         shell: pwsh
@@ -63,12 +61,23 @@ jobs:
           Write-Host "Generator: $generator"
           "generator=$generator" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      # ── Step 3: Install deps ──
       - name: Install Windows dependencies
         shell: pwsh
         run: choco install -y winflexbison3 7zip
 
-      # ── Step 4: Csound commit SHA ──
+      # ── NEW: install curl via runner's vcpkg ──
+      - name: Install libcurl via vcpkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vcpkgExe = "C:\vcpkg\vcpkg.exe"
+          if (-not (Test-Path $vcpkgExe)) { throw "vcpkg not found at $vcpkgExe" }
+          & $vcpkgExe install curl:x64-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "Installed curl at C:\vcpkg\installed\x64-windows"
+          Get-ChildItem "C:\vcpkg\installed\x64-windows\lib" -Filter "libcurl*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  lib: $($_.Name)" }
+
       - name: Resolve Csound commit SHA
         id: csound-source
         shell: bash
@@ -85,7 +94,6 @@ jobs:
           echo "sha=${csound_sha}" >> "${GITHUB_OUTPUT}"
           echo "Csound ${CSOUND_VERSION_REF} -> ${csound_sha}"
 
-      # ── Step 5: Cache Csound ──
       - name: Cache Csound install
         id: cache-csound
         uses: actions/cache@v4
@@ -95,7 +103,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ env.CSOUND_CACHE_VERSION }}-
 
-      # ── Step 6: Validate cache ──
       - name: Validate Csound cache
         id: validate-csound-cache
         shell: pwsh
@@ -109,7 +116,6 @@ jobs:
           if ($ok -eq 1) { Write-Host "Csound cache valid."; & $exe --version }
           else { Write-Host "Csound cache INVALID."; if (Test-Path $P) { Remove-Item -Recurse -Force $P } }
 
-      # ── Step 7: Checkout Csound source ──
       - name: Checkout Csound
         uses: actions/checkout@v4
         with:
@@ -118,7 +124,6 @@ jobs:
           path: csound-source
           submodules: recursive
 
-      # ── Step 8: Build Csound (if cache miss) ──
       - name: Build and install Csound
         if: steps.validate-csound-cache.outputs.valid != '1'
         shell: pwsh
@@ -144,7 +149,6 @@ jobs:
           Pop-Location
           Get-ChildItem $env:CSOUND_INSTALL_PREFIX -Recurse -Depth 3 | Select-Object -First 200
 
-      # ── Step 9: PATH ──
       - name: Add Csound to environment
         shell: pwsh
         run: |
@@ -152,10 +156,10 @@ jobs:
           $lib = Join-Path $env:CSOUND_INSTALL_PREFIX "lib"
           $lib64 = Join-Path $env:CSOUND_INSTALL_PREFIX "lib64"
           Add-Content -Path $env:GITHUB_PATH -Value $bin
-          Add-Content -Path $env:GITHUB_ENV  -Value "PATH=$bin;$lib;$lib64;$env:PATH"
-          Add-Content -Path $env:GITHUB_ENV  -Value "CSOUND_ROOT=$($env:CSOUND_INSTALL_PREFIX)"
+          Add-Content -Path $env:GITHUB_ENV -Value "PATH=$bin;$lib;$lib64;$env:PATH"
+          Add-Content -Path $env:GITHUB_ENV -Value "CSOUND_ROOT=$($env:CSOUND_INSTALL_PREFIX)"
 
-      # ── Step 10: Configure CsoundVST3 ──
+      # ── Configure: CMAKE_PREFIX_PATH now includes runner vcpkg for curl ──
       - name: Configure CsoundVST3
         shell: pwsh
         run: |
@@ -174,11 +178,21 @@ jobs:
 
           Write-Host "exe: $csoundExe"
           Write-Host "lib: $($csoundLib.FullName)"
-          Write-Host "gen: ${{ steps.detect-vs.outputs.generator }}"
 
-          $vcpkg = Join-Path $env:GITHUB_WORKSPACE "csound-source\vcpkg_installed\x64-windows"
+          # Build CMAKE_PREFIX_PATH from all available sources
           $prefixPath = @($env:CSOUND_INSTALL_PREFIX)
-          if (Test-Path $vcpkg) { $prefixPath += $vcpkg }
+
+          $csoundVcpkg = Join-Path $env:GITHUB_WORKSPACE "csound-source\vcpkg_installed\x64-windows"
+          if (Test-Path $csoundVcpkg) {
+            $prefixPath += $csoundVcpkg
+            Write-Host "Adding Csound vcpkg: $csoundVcpkg"
+          }
+
+          $runnerVcpkg = "C:\vcpkg\installed\x64-windows"
+          if (Test-Path $runnerVcpkg) {
+            $prefixPath += $runnerVcpkg
+            Write-Host "Adding runner vcpkg: $runnerVcpkg"
+          }
 
           cmake -S CsoundVST3 -B build-windows `
             -G "${{ steps.detect-vs.outputs.generator }}" -A x64 `
@@ -190,9 +204,7 @@ jobs:
             -DCSOUND_LIBRARIES="$($csoundLib.FullName)"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # ═══════════════════════════════════════════════
-      # Step 11: BUILD — this is the step that was missing!
-      # ═══════════════════════════════════════════════
+      # ── Build ──
       - name: Build CsoundVST3
         shell: pwsh
         run: |
@@ -200,7 +212,7 @@ jobs:
           cmake --build build-windows --config "${{ env.BUILD_TYPE }}" --parallel --target archive_dist
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # ── Step 12: Verify dist ──
+      # ── Verify ──
       - name: Verify dist contents
         shell: pwsh
         run: |
@@ -212,16 +224,14 @@ jobs:
               Write-Host ("  {0,-70} {1}" -f $rel, $size)
             }
           } else {
-            Write-Error "dist directory is empty - build step likely failed silently"
+            Write-Error "dist directory is empty!"
             exit 1
           }
           $vst3 = Get-ChildItem dist -Recurse -Filter "*.vst3" -ErrorAction SilentlyContinue
-          if (-not $vst3) { Write-Error "No .vst3 file found!"; exit 1 }
+          if (-not $vst3) { Write-Error "No .vst3 found!"; exit 1 }
           Write-Host "`nVST3: $($vst3.FullName)"
-          $exe = Get-ChildItem dist -Recurse -Filter "*.exe" -ErrorAction SilentlyContinue
-          if ($exe) { Write-Host "EXE:  $($exe.FullName)" }
 
-      # ── Step 13: Upload artifacts ──
+      # ── Upload ──
       - name: Upload dist directory
         uses: actions/upload-artifact@v4
         with:

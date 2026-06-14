@@ -424,14 +424,17 @@ if(APPLE)
     endif()
 
 elseif(WIN32)
+    # VST3 plugin — covers RUNTIME (exe-like DLL), LIBRARY (MODULE), and BUNDLE (JUCE bundle dir).
     if(TARGET CsoundVST3_VST3)
         install(TARGETS CsoundVST3_VST3
             RUNTIME DESTINATION "VST3"
             LIBRARY DESTINATION "VST3"
+            BUNDLE DESTINATION "VST3"
             COMPONENT CsoundVST3_Runtime
         )
     endif()
 
+    # Standalone executable.
     if(TARGET CsoundVST3_Standalone)
         install(TARGETS CsoundVST3_Standalone
             RUNTIME DESTINATION "Standalone"
@@ -439,42 +442,8 @@ elseif(WIN32)
             COMPONENT CsoundVST3_Runtime
         )
     endif()
-
-    # Bundle Csound runtime DLLs next to each plugin/standalone.
-    if(CSOUND_EXECUTABLE)
-        get_filename_component(_csound_bin_dir "${CSOUND_EXECUTABLE}" DIRECTORY)
-        file(GLOB _csound_runtime_dlls "${_csound_bin_dir}/*.dll")
-        if(_csound_runtime_dlls)
-            foreach(_dll_dest IN ITEMS "VST3" "Standalone")
-                install(FILES ${_csound_runtime_dlls}
-                    DESTINATION "${_dll_dest}"
-                    COMPONENT CsoundVST3_Runtime
-                )
-            endforeach()
-            message(STATUS "Will install Csound DLLs to VST3/ and Standalone/ in dist")
-        endif()
-    endif()
-
-    # POST_BUILD: copy DLLs into build-tree output so the plugin
-    # can be tested directly from the build directory.
-    if(CSOUND_EXECUTABLE)
-        get_filename_component(_csound_bin_dir "${CSOUND_EXECUTABLE}" DIRECTORY)
-        file(GLOB _csound_runtime_dlls "${_csound_bin_dir}/*.dll")
-        foreach(_win_plugin_t IN ITEMS CsoundVST3_VST3 CsoundVST3_Standalone)
-            if(TARGET ${_win_plugin_t} AND _csound_runtime_dlls)
-                foreach(_csound_dll IN LISTS _csound_runtime_dlls)
-                    add_custom_command(TARGET ${_win_plugin_t} POST_BUILD
-                        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                            "${_csound_dll}"
-                            "$<TARGET_FILE_DIR:${_win_plugin_t}>"
-                        get_filename_component(_csound_dll_name "${_csound_dll}" NAME)
-                        COMMENT "Copying ${_csound_dll_name} to ${_win_plugin_t} output"
-                        VERBATIM
-                    )
-                endforeach()
-            endif()
-        endforeach()
-    endif()
+    # NOTE: Csound runtime DLLs are staged into dist/ by the stage_dist target
+    # (explicit copy_directory commands), not via install(FILES ...).
 
 else()
     if(TARGET CsoundVST3_VST3)
@@ -492,6 +461,7 @@ else()
         )
     endif()
 endif()
+
 
 
 install(FILES
@@ -513,10 +483,17 @@ add_custom_target(clean_dist
     COMMENT "Creating clean dist directory"
 )
 
-# macOS only: install copies .app/.vst3/.component from the build tree; they must be built first.
-# Depending only on CsoundVST3 can leave CsoundVST3_Standalone unbuilt and yield an empty Contents/MacOS/.
-# ===== 修改段 2: stage_dist deps — all platforms =====
-set(CSOUND_VST3_STAGE_DIST_DEPS clean_dist CsoundVST3)
+# ── stage_dist: clean → cmake --install → (Windows) explicit artefact copy ──
+#
+# We inline the clean into stage_dist's own COMMAND list to guarantee correct
+# ordering.  Relying on clean_dist in DEPENDS is unsafe because CMake does not
+# guarantee the execution order of DEPENDS targets relative to each other —
+# clean_dist could run *after* cmake --install, wiping the installed files.
+#
+# On Windows, cmake --install may not handle JUCE's VST3/Standalone bundle
+# layout correctly, so we copy the JUCE artefact directories explicitly.
+
+set(CSOUND_VST3_STAGE_DIST_DEPS CsoundVST3)
 if(APPLE)
     set(_stage_plugin_targets CsoundVST3_Standalone CsoundVST3_VST3 CsoundVST3_AU)
 else()
@@ -527,11 +504,65 @@ foreach(_stage_bundle_t IN LISTS _stage_plugin_targets)
         list(APPEND CSOUND_VST3_STAGE_DIST_DEPS ${_stage_bundle_t})
     endif()
 endforeach()
+
+# ── Build the COMMAND list ──
+set(_stage_dist_commands
+    # 1) Clean dist (guaranteed first)
+    COMMAND "${CMAKE_COMMAND}" -E rm -rf "${CSOUND_VST3_DIST_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${CSOUND_VST3_DIST_DIR}"
+    # 2) cmake --install for README, Resources, static lib, etc.
+    COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}"
+        --prefix "${CSOUND_VST3_DIST_DIR}"
+        --component CsoundVST3_Runtime
+        --config "$<CONFIG>"
+)
+
+if(WIN32)
+    # 3a) Copy VST3 plugin bundle from JUCE artefact directory.
+    #     JUCE 8.x outputs to: ${CMAKE_BINARY_DIR}/CsoundVST3_artefacts/<CONFIG>/VST3/
+    #     This directory contains the .vst3 bundle (directory with Contents/ inside).
+    if(TARGET CsoundVST3_VST3)
+        list(APPEND _stage_dist_commands
+            COMMAND "${CMAKE_COMMAND}" -E make_directory
+                "${CSOUND_VST3_DIST_DIR}/VST3"
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                "${CMAKE_BINARY_DIR}/CsoundVST3_artefacts/$<CONFIG>/VST3"
+                "${CSOUND_VST3_DIST_DIR}/VST3"
+        )
+    endif()
+    # 3b) Copy Standalone executable from JUCE artefact directory.
+    if(TARGET CsoundVST3_Standalone)
+        list(APPEND _stage_dist_commands
+            COMMAND "${CMAKE_COMMAND}" -E make_directory
+                "${CSOUND_VST3_DIST_DIR}/Standalone"
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                "${CMAKE_BINARY_DIR}/CsoundVST3_artefacts/$<CONFIG>/Standalone"
+                "${CSOUND_VST3_DIST_DIR}/Standalone"
+        )
+    endif()
+    # 3c) Copy Csound runtime DLLs next to each plugin/standalone.
+    #     Windows DLL search: same directory as the .exe/.vst3, or PATH.
+    if(CSOUND_EXECUTABLE)
+        get_filename_component(_csound_bin_dir "${CSOUND_EXECUTABLE}" DIRECTORY)
+        file(GLOB _csound_runtime_dlls "${_csound_bin_dir}/*.dll")
+        foreach(_csound_dll IN LISTS _csound_runtime_dlls)
+            foreach(_dll_dest IN ITEMS "VST3" "Standalone")
+                list(APPEND _stage_dist_commands
+                    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "${_csound_dll}"
+                        "${CSOUND_VST3_DIST_DIR}/${_dll_dest}/"
+                )
+            endforeach()
+        endforeach()
+    endif()
+endif()
+
 add_custom_target(stage_dist
     DEPENDS ${CSOUND_VST3_STAGE_DIST_DEPS}
-    COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}" --prefix "${CSOUND_VST3_DIST_DIR}" --component CsoundVST3_Runtime --config "$<CONFIG>"
-    COMMENT "Installing runtime artifacts into dist"
+    ${_stage_dist_commands}
+    COMMENT "Staging distribution artifacts into dist"
 )
+
 
 if(APPLE)
     add_custom_target(sign_dist

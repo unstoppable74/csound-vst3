@@ -1,192 +1,338 @@
-# .github/workflows/build-windows.yml  
-name: Build Windows VST3  
-  
-on:  
-  push:  
-    branches: [main]  
-  pull_request:  
-  workflow_dispatch:  
-  
-permissions:  
-  contents: read  
-  
-env:  
-  BUILD_TYPE: RelWithDebInfo  
-  CSOUND_VERSION_REF: develop  
-  CSOUND_INSTALL_PREFIX: ${{ github.workspace }}/.cache/csound-install  
-  CSOUND_CACHE_VERSION_WINDOWS: csound7-develop-v8-msvc  
-  
-jobs:  
-  build-windows:  
-    name: Windows (MSVC x64)  
-    runs-on: windows-latest  
-  
-    steps:  
-      - name: Check out csound-vst3  
-        uses: actions/checkout@v4  
-        with:  
-          submodules: recursive  
-  
-      - name: Install Windows dependencies  
-        shell: pwsh  
-        run: choco install -y winflexbison3 7zip  
-  
-      - name: Resolve Csound develop commit  
-        id: csound-source  
-        shell: bash  
-        run: |  
-          set -euo pipefail  
-          csound_sha="$(git ls-remote https://github.com/csound/csound.git \  
-            refs/heads/${CSOUND_VERSION_REF} | awk '{print $1}')"  
-          if [[ -z "${csound_sha}" ]]; then  
-            echo "Could not resolve Csound ${CSOUND_VERSION_REF} branch." >&2  
-            exit 1  
-          fi  
-          echo "sha=${csound_sha}" >> "${GITHUB_OUTPUT}"  
-          echo "Csound ${CSOUND_VERSION_REF}: ${csound_sha}"  
-  
-      - name: Cache Csound install  
-        uses: actions/cache@v4  
-        with:  
-          path: .cache/csound-install  
-          key: ${{ runner.os }}-${{ env.CSOUND_CACHE_VERSION_WINDOWS }}-${{ steps.csound-source.outputs.sha }}  
-  
-      - name: Validate Csound cache  
-        id: validate-csound-cache  
-        shell: pwsh  
-        run: |  
-          $P = $env:CSOUND_INSTALL_PREFIX  
-          $exe = @(  
-            (Join-Path $P "bin\csound64.exe"),  
-            (Join-Path $P "bin\csound.exe")  
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1  
-          $lib = @(  
-            (Join-Path $P "lib\csound64.lib"),  
-            (Join-Path $P "lib64\csound64.lib"),  
-            (Join-Path $P "lib\csound.lib")  
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1  
-          $dll = @(  
-            (Join-Path $P "bin\csound64.dll")  
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1  
-          $ok = 0  
-          if ($exe -and $lib -and $dll) { $ok = 1 }  
-          "valid=$ok" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8  
-          if ($ok -eq 1) { & $exe --version }  
-          else { if (Test-Path $P) { Remove-Item -Recurse -Force $P } }  
-  
-      - name: Check out Csound source  
-        uses: actions/checkout@v4  
-        with:  
-          repository: csound/csound  
-          ref: ${{ env.CSOUND_VERSION_REF }}  
-          path: csound-source  
-          submodules: recursive  
-  
-      - name: Detect Visual Studio generator  
-        id: vs-gen  
-        shell: pwsh  
-        run: |  
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"  
-          $vsVer   = & $vsWhere -latest -property installationVersion  
-          $major   = [int]($vsVer -split '\.')[0]  
-          $yearMap = @{ 17 = "2022"; 18 = "2026" }  
-          $year    = if ($yearMap.ContainsKey($major)) { $yearMap[$major] } else { "2022" }  
-          $gen     = "Visual Studio $major $year"  
-          Write-Host "Detected generator: $gen"  
-          "generator=$gen" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8  
-  
-      - name: Build and install Csound (MSVC)  
-        if: steps.validate-csound-cache.outputs.valid != '1'  
-        shell: pwsh  
-        run: |  
-          $ErrorActionPreference = "Stop"  
-          Push-Location csound-source  
-          .\vcpkg\bootstrap-vcpkg.bat  
-  
-          # Use array splatting — avoids backtick continuation bugs entirely  
-          $cmakeArgs = @(  
-            "-B", "build", "-S", ".",  
-            "-DUSE_VCPKG=1",  
-            "-DCUSTOM_CMAKE=./platform/windows/Custom-vs.cmake",  
-            "-DBUILD_TESTS=OFF",  
-            "-DBUILD_STATIC_LIBRARY=OFF",  
-            "-DBUILD_MULTI_CORE=ON",  
-            "-DBUILD_JAVA_INTERFACE=OFF",  
-            "-DBUILD_PYTHON_INTERFACE=OFF",  
-            "-DINSTALL_PYTHON_INTERFACE=OFF",  
-            "-DBUILD_PYTHON_OPCODES=OFF",  
-            "-DUSE_PYTHON=OFF",  
-            "-DUSE_DOUBLE=ON",  
-            "-DCMAKE_INSTALL_PREFIX=$env:CSOUND_INSTALL_PREFIX"  
-          )  
-          cmake @cmakeArgs  
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }  
-  
-          cmake --build build --config Release --parallel  
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }  
-  
-          cmake --install build --config Release  
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }  
-  
-          Pop-Location  
-          Get-ChildItem -Path $env:CSOUND_INSTALL_PREFIX -Recurse -Depth 3 |  
-            Select-Object -First 200  
-  
-      - name: Add Csound to environment  
-        shell: pwsh  
-        run: |  
-          $bin   = Join-Path $env:CSOUND_INSTALL_PREFIX "bin"  
-          $lib   = Join-Path $env:CSOUND_INSTALL_PREFIX "lib"  
-          $lib64 = Join-Path $env:CSOUND_INSTALL_PREFIX "lib64"  
-          Add-Content -Path $env:GITHUB_PATH -Value $bin  
-          Add-Content -Path $env:GITHUB_ENV  -Value "PATH=$bin;$lib;$lib64;$env:PATH"  
-          Add-Content -Path $env:GITHUB_ENV  -Value "CSOUND_ROOT=$($env:CSOUND_INSTALL_PREFIX)"  
-  
-      - name: Build CsoundVST3  
-        shell: pwsh  
-        run: |  
-          $ErrorActionPreference = "Stop"  
-          if (Test-Path "build-windows") { Remove-Item -Recurse -Force "build-windows" }  
-          if (Test-Path "dist")          { Remove-Item -Recurse -Force "dist" }  
-  
-          $csoundExe = @(  
-            (Join-Path $env:CSOUND_INSTALL_PREFIX "bin\csound64.exe"),  
-            (Join-Path $env:CSOUND_INSTALL_PREFIX "bin\csound.exe")  
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1  
-  
-          $csoundLib = Get-ChildItem -Path $env:CSOUND_INSTALL_PREFIX -Recurse `  
-            -Include @("csound64.lib","libcsound64.lib") -ErrorAction SilentlyContinue |  
-            Select-Object -First 1  
-          if (-not $csoundLib) {  
-            throw "Could not find csound64.lib under $($env:CSOUND_INSTALL_PREFIX)"  
-          }  
-  
-          $vcpkg = Join-Path $env:GITHUB_WORKSPACE "csound-source\vcpkg_installed\x64-windows"  
-          $prefixParts = @($env:CSOUND_INSTALL_PREFIX)  
-          if (Test-Path $vcpkg) { $prefixParts += $vcpkg }  
-          $prefixPath = $prefixParts -join ";"  
-  
-          $cmakeArgs = @(  
-            "-S", "CsoundVST3",  
-            "-B", "build-windows",  
-            "-G", "${{ steps.vs-gen.outputs.generator }}",  
-            "-A", "x64",  
-            "-DCMAKE_INSTALL_PREFIX=$env:GITHUB_WORKSPACE/dist",  
-            "-DCMAKE_PREFIX_PATH=$prefixPath",  
-            "-DCSOUND_ROOT_HINT=$env:CSOUND_INSTALL_PREFIX",  
-            "-DCSOUND_EXECUTABLE=$csoundExe",  
-            "-DCSOUND_LIBRARY=$($csoundLib.FullName)",  
-            "-DCSOUND_LIBRARIES=$($csoundLib.FullName)"  
-          )  
-          cmake @cmakeArgs  
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }  
-  
-          cmake --build build-windows --config "${{ env.BUILD_TYPE }}" --parallel --target archive_dist  
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }  
-  
-      - name: Upload artifact  
-        uses: actions/upload-artifact@v4  
-        with:  
-          name: csound-vst3-windows  
-          path: build-windows/csound-vst3-*-windows.zip  
-          if-no-files-found: error
+# .github/workflows/build-windows.yml
+#
+# CsoundVST3 – Windows (x64) Build
+#
+# Strategy (aligned with the existing multi-platform workflow):
+#   1. Build Csound 7 from source (develop branch) with vcpkg, cache the install.
+#   2. Configure CsoundVST3 with CSOUND_ROOT_HINT pointing to the cached install.
+#   3. Build the archive_dist target (stage → sign → archive).
+#   4. Upload artifacts.
+
+name: Build Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "CMake build configuration"
+        required: false
+        default: "RelWithDebInfo"
+        type: choice
+        options:
+          - RelWithDebInfo
+          - Release
+          - Debug
+      csound_ref:
+        description: "Csound branch or tag to build"
+        required: false
+        default: "develop"
+
+permissions:
+  contents: write
+
+env:
+  BUILD_TYPE: ${{ inputs.config || 'RelWithDebInfo' }}
+  CSOUND_VERSION_REF: ${{ inputs.csound_ref || 'develop' }}
+  CSOUND_CACHE_VERSION: csound7-develop-v7-msvc
+
+jobs:
+  build:
+    name: Windows x64 Build
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    env:
+      CSOUND_INSTALL_PREFIX: ${{ github.workspace }}/.cache/csound-install
+
+    steps:
+      # ─────────────────────────────────────────────
+      # 1. Checkout CsoundVST3
+      # ─────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ─────────────────────────────────────────────
+      # 2. Install Windows build tools
+      # ─────────────────────────────────────────────
+      - name: Install Windows dependencies
+        shell: pwsh
+        run: |
+          choco install -y winflexbison3 7zip
+
+      # ─────────────────────────────────────────────
+      # 3. Resolve Csound develop commit for cache key
+      # ─────────────────────────────────────────────
+      - name: Resolve Csound commit SHA
+        id: csound-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          csound_sha="$(git ls-remote https://github.com/csound/csound.git \
+            "refs/heads/${CSOUND_VERSION_REF}" | awk '{print $1}')"
+          if [[ -z "${csound_sha}" ]]; then
+            # Try as a tag
+            csound_sha="$(git ls-remote https://github.com/csound/csound.git \
+              "refs/tags/${CSOUND_VERSION_REF}" | awk '{print $1}')"
+          fi
+          if [[ -z "${csound_sha}" ]]; then
+            echo "::error::Could not resolve Csound ref: ${CSOUND_VERSION_REF}"
+            exit 1
+          fi
+          echo "sha=${csound_sha}" >> "${GITHUB_OUTPUT}"
+          echo "Csound ${CSOUND_VERSION_REF} → ${csound_sha}"
+
+      # ─────────────────────────────────────────────
+      # 4. Cache the Csound install directory
+      # ─────────────────────────────────────────────
+      - name: Cache Csound install
+        id: cache-csound
+        uses: actions/cache@v4
+        with:
+          path: .cache/csound-install
+          key: ${{ runner.os }}-${{ env.CSOUND_CACHE_VERSION }}-${{ steps.csound-source.outputs.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ env.CSOUND_CACHE_VERSION }}-
+
+      # ─────────────────────────────────────────────
+      # 5. Validate cached Csound install
+      #
+      #    FindCsoundHomeFirst.cmake on Windows searches:
+      #      1. CSOUND_ROOT_HINT (if set)
+      #      2. %USERPROFILE% or %HOME%
+      #      3. C:/Program Files/Csound
+      #      4. C:/Program Files (x86)/Csound
+      #
+      #    Library names: csound64, csound64-6.0, csound, csound64.lib
+      #    Include: csound.h or csound/csound.h
+      # ─────────────────────────────────────────────
+      - name: Validate Csound cache
+        id: validate-csound-cache
+        shell: pwsh
+        run: |
+          $P = $env:CSOUND_INSTALL_PREFIX
+          $exe = @(
+            (Join-Path $P "bin\csound64.exe"),
+            (Join-Path $P "bin\csound.exe")
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $lib = @(
+            (Join-Path $P "lib\csound64.lib"),
+            (Join-Path $P "lib64\csound64.lib"),
+            (Join-Path $P "lib\csound.lib")
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $dll = @(
+            (Join-Path $P "bin\csound64.dll")
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          $ok = 0
+          if ($exe -and $lib -and $dll) { $ok = 1 }
+          "valid=$ok" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+          if ($ok -eq 1) {
+            Write-Host "Csound cache is valid."
+            Write-Host "  exe: $exe"
+            Write-Host "  lib: $lib"
+            Write-Host "  dll: $dll"
+            & $exe --version
+          } else {
+            Write-Host "Csound cache is INVALID or incomplete; will rebuild."
+            if (Test-Path $P) { Remove-Item -Recurse -Force $P }
+          }
+
+      # ─────────────────────────────────────────────
+      # 6. Checkout Csound source (for building)
+      # ─────────────────────────────────────────────
+      - name: Checkout Csound
+        uses: actions/checkout@v4
+        with:
+          repository: csound/csound
+          ref: ${{ env.CSOUND_VERSION_REF }}
+          path: csound-source
+          submodules: recursive
+
+      # ─────────────────────────────────────────────
+      # 7. Build and install Csound (if cache miss)
+      #
+      #    Uses Csound's own vcpkg integration:
+      #      -DUSE_VCPKG=1
+      #      -DCUSTOM_CMAKE="./platform/windows/Custom-vs.cmake"
+      # ─────────────────────────────────────────────
+      - name: Build and install Csound - Windows
+        if: steps.validate-csound-cache.outputs.valid != '1'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Push-Location csound-source
+
+          # Bootstrap vcpkg (Csound ships vcpkg as a submodule)
+          .\vcpkg\bootstrap-vcpkg.bat
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          cmake -B build -S . `
+            -DUSE_VCPKG=1 `
+            -DCUSTOM_CMAKE="./platform/windows/Custom-vs.cmake" `
+            -DBUILD_TESTS=OFF `
+            -DBUILD_STATIC_LIBRARY=OFF `
+            -DBUILD_MULTI_CORE=ON `
+            -DBUILD_JAVA_INTERFACE=OFF `
+            -DBUILD_PYTHON_INTERFACE=OFF `
+            -DINSTALL_PYTHON_INTERFACE=OFF `
+            -DBUILD_PYTHON_OPCODES=OFF `
+            -DUSE_PYTHON=OFF `
+            -DUSE_DOUBLE=ON `
+            -DCMAKE_INSTALL_PREFIX="$env:CSOUND_INSTALL_PREFIX"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          cmake --build build --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          cmake --install build --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Pop-Location
+
+          Write-Host "`n=== Csound install tree ==="
+          Get-ChildItem -Path $env:CSOUND_INSTALL_PREFIX -Recurse -Depth 3 |
+            Select-Object -First 200 |
+            ForEach-Object { Write-Host "  $($_.FullName)" }
+
+      # ─────────────────────────────────────────────
+      # 8. Add Csound to PATH
+      # ─────────────────────────────────────────────
+      - name: Add Csound to environment
+        shell: pwsh
+        run: |
+          $bin  = Join-Path $env:CSOUND_INSTALL_PREFIX "bin"
+          $lib  = Join-Path $env:CSOUND_INSTALL_PREFIX "lib"
+          $lib64 = Join-Path $env:CSOUND_INSTALL_PREFIX "lib64"
+          Add-Content -Path $env:GITHUB_PATH   -Value $bin
+          Add-Content -Path $env:GITHUB_ENV    -Value "PATH=$bin;$lib;$lib64;$env:PATH"
+          Add-Content -Path $env:GITHUB_ENV    -Value "CSOUND_ROOT=$($env:CSOUND_INSTALL_PREFIX)"
+
+      # ─────────────────────────────────────────────
+      # 9. Configure CsoundVST3
+      #
+      #    Key: CSOUND_ROOT_HINT tells FindCsoundHomeFirst.cmake
+      #    where to look. We also pass explicit CSOUND_EXECUTABLE
+      #    and CSOUND_LIBRARY as a belt-and-suspenders approach.
+      #
+      #    Csound's vcpkg-installed libs are added to
+      #    CMAKE_PREFIX_PATH so find_package(CURL) succeeds.
+      # ─────────────────────────────────────────────
+      - name: Configure CsoundVST3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Clean build + dist dirs (matches existing workflow)
+          if (Test-Path build-windows)  { Remove-Item -Recurse -Force build-windows }
+          if (Test-Path dist)           { Remove-Item -Recurse -Force dist }
+
+          # Find csound executable
+          $csoundExe = @(
+            (Join-Path $env:CSOUND_INSTALL_PREFIX "bin\csound64.exe"),
+            (Join-Path $env:CSOUND_INSTALL_PREFIX "bin\csound.exe")
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if (-not $csoundExe) {
+            throw "Could not find csound executable under $($env:CSOUND_INSTALL_PREFIX)"
+          }
+
+          # Find csound library (matches FindCsoundHomeFirst.cmake library names)
+          $csoundLib = Get-ChildItem -Path $env:CSOUND_INSTALL_PREFIX -Recurse -Include @(
+            "csound64.lib", "libcsound64.lib"
+          ) -ErrorAction SilentlyContinue | Select-Object -First 1
+
+          if (-not $csoundLib) {
+            throw "Could not find csound64.lib under $($env:CSOUND_INSTALL_PREFIX)"
+          }
+
+          Write-Host "Csound executable: $csoundExe"
+          Write-Host "Csound library:    $($csoundLib.FullName)"
+
+          # Build CMAKE_PREFIX_PATH: include Csound's vcpkg-installed deps if present
+          $vcpkg = Join-Path $env:GITHUB_WORKSPACE "csound-source\vcpkg_installed\x64-windows"
+          $prefixPath = @($env:CSOUND_INSTALL_PREFIX)
+          if (Test-Path $vcpkg) {
+            $prefixPath += $vcpkg
+            Write-Host "Adding vcpkg to prefix path: $vcpkg"
+          }
+
+          cmake -S CsoundVST3 -B build-windows `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE\dist" `
+            -DCMAKE_PREFIX_PATH="$(($prefixPath -join ';'))" `
+            -DCSOUND_ROOT_HINT="$env:CSOUND_INSTALL_PREFIX" `
+            -DCSOUND_EXECUTABLE="$csoundExe" `
+            -DCSOUND_LIBRARY="$($csoundLib.FullName)" `
+            -DCSOUND_LIBRARIES="$($csoundLib.FullName)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # ─────────────────────────────────────────────
+      # 10. Build CsoundVST3
+      #
+      #     archive_dist target chains:
+      #       clean_dist → stage_dist → sign_dist → archive_dist
+      #     On Windows, sign_dist is a no-op (no codesign step).
+      # ─────────────────────────────────────────────
+      - name: Build CsoundVST3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake --build build-windows --config "${{ env.BUILD_TYPE }}" --parallel --target archive_dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # ─────────────────────────────────────────────
+      # 11. Verify dist contents
+      # ─────────────────────────────────────────────
+      - name: Verify dist contents
+        shell: pwsh
+        run: |
+          Write-Host "=== dist/ directory ==="
+          if (Test-Path dist) {
+            Get-ChildItem dist -Recurse | ForEach-Object {
+              $size = if ($_.PSIsContainer) { "<DIR>" } else { "$([math]::Round($_.Length / 1KB, 1)) KB" }
+              Write-Host ("  {0,-60} {1}" -f $_.FullName.Replace("$env:GITHUB_WORKSPACE\dist\", ""), $size)
+            }
+          } else {
+            Write-Host "  (empty)"
+          }
+
+          # Show the archive
+          Write-Host "`n=== build archive ==="
+          Get-ChildItem build-windows -Filter "csound-vst3-*.zip" -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $($_.FullName) ($([math]::Round($_.Length / 1MB, 2)) MB)" }
+
+      # ─────────────────────────────────────────────
+      # 12. Upload artifacts
+      # ─────────────────────────────────────────────
+      - name: Upload dist directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: csound-vst3-windows-dist
+          path: dist/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload distribution archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: csound-vst3-windows-archive
+          path: build-windows/csound-vst3-*-windows.zip
+          retention-days: 14
+          if-no-files-found: warn
+
+      # ─────────────────────────────────────────────
+      # 13. Upload diagnostics on failure
+      # ─────────────────────────────────────────────
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: csound-vst3-windows-diagnostics
+          path: |
+            build-windows/CMakeFiles/CMakeOutput.log
+            build-windows/CMakeFiles/CMakeError.log
+            build-windows/CMakeCache.txt
+          retention-days: 7

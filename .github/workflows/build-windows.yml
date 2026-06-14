@@ -14,7 +14,7 @@ env:
   BUILD_TYPE: RelWithDebInfo  
   CSOUND_VERSION_REF: develop  
   CSOUND_INSTALL_PREFIX: ${{ github.workspace }}/.cache/csound-install  
-  CSOUND_CACHE_VERSION_WINDOWS: csound7-develop-v7-msvc  
+  CSOUND_CACHE_VERSION_WINDOWS: csound7-develop-v8-msvc  
   
 jobs:  
   build-windows:  
@@ -31,12 +31,13 @@ jobs:
         shell: pwsh  
         run: choco install -y winflexbison3 7zip  
   
-      - name: Resolve Csound develop commit (for cache key)  
+      - name: Resolve Csound develop commit  
         id: csound-source  
         shell: bash  
         run: |  
           set -euo pipefail  
-          csound_sha="$(git ls-remote https://github.com/csound/csound.git refs/heads/${CSOUND_VERSION_REF} | awk '{print $1}')"  
+          csound_sha="$(git ls-remote https://github.com/csound/csound.git \  
+            refs/heads/${CSOUND_VERSION_REF} | awk '{print $1}')"  
           if [[ -z "${csound_sha}" ]]; then  
             echo "Could not resolve Csound ${CSOUND_VERSION_REF} branch." >&2  
             exit 1  
@@ -70,11 +71,8 @@ jobs:
           $ok = 0  
           if ($exe -and $lib -and $dll) { $ok = 1 }  
           "valid=$ok" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8  
-          if ($ok -eq 1) {  
-            & $exe --version  
-          } else {  
-            if (Test-Path $P) { Remove-Item -Recurse -Force $P }  
-          }  
+          if ($ok -eq 1) { & $exe --version }  
+          else { if (Test-Path $P) { Remove-Item -Recurse -Force $P } }  
   
       - name: Check out Csound source  
         uses: actions/checkout@v4  
@@ -84,6 +82,19 @@ jobs:
           path: csound-source  
           submodules: recursive  
   
+      - name: Detect Visual Studio generator  
+        id: vs-gen  
+        shell: pwsh  
+        run: |  
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"  
+          $vsVer   = & $vsWhere -latest -property installationVersion  
+          $major   = [int]($vsVer -split '\.')[0]  
+          $yearMap = @{ 17 = "2022"; 18 = "2026" }  
+          $year    = if ($yearMap.ContainsKey($major)) { $yearMap[$major] } else { "2022" }  
+          $gen     = "Visual Studio $major $year"  
+          Write-Host "Detected generator: $gen"  
+          "generator=$gen" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8  
+  
       - name: Build and install Csound (MSVC)  
         if: steps.validate-csound-cache.outputs.valid != '1'  
         shell: pwsh  
@@ -91,31 +102,41 @@ jobs:
           $ErrorActionPreference = "Stop"  
           Push-Location csound-source  
           .\vcpkg\bootstrap-vcpkg.bat  
-          cmake -B build -S . `  
-            -DUSE_VCPKG=1 `  
-            -DCUSTOM_CMAKE="./platform/windows/Custom-vs.cmake" `  
-            -DBUILD_TESTS=OFF `  
-            -DBUILD_STATIC_LIBRARY=OFF `  
-            -DBUILD_MULTI_CORE=ON `  
-            -DBUILD_JAVA_INTERFACE=OFF `  
-            -DBUILD_PYTHON_INTERFACE=OFF `  
-            -DINSTALL_PYTHON_INTERFACE=OFF `  
-            -DBUILD_PYTHON_OPCODES=OFF `  
-            -DUSE_PYTHON=OFF `  
-            -DUSE_DOUBLE=ON `  
-            -DCMAKE_INSTALL_PREFIX="$env:CSOUND_INSTALL_PREFIX"  
+  
+          # Use array splatting — avoids backtick continuation bugs entirely  
+          $cmakeArgs = @(  
+            "-B", "build", "-S", ".",  
+            "-DUSE_VCPKG=1",  
+            "-DCUSTOM_CMAKE=./platform/windows/Custom-vs.cmake",  
+            "-DBUILD_TESTS=OFF",  
+            "-DBUILD_STATIC_LIBRARY=OFF",  
+            "-DBUILD_MULTI_CORE=ON",  
+            "-DBUILD_JAVA_INTERFACE=OFF",  
+            "-DBUILD_PYTHON_INTERFACE=OFF",  
+            "-DINSTALL_PYTHON_INTERFACE=OFF",  
+            "-DBUILD_PYTHON_OPCODES=OFF",  
+            "-DUSE_PYTHON=OFF",  
+            "-DUSE_DOUBLE=ON",  
+            "-DCMAKE_INSTALL_PREFIX=$env:CSOUND_INSTALL_PREFIX"  
+          )  
+          cmake @cmakeArgs  
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }  
+  
           cmake --build build --config Release --parallel  
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }  
+  
           cmake --install build --config Release  
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }  
+  
           Pop-Location  
+          Get-ChildItem -Path $env:CSOUND_INSTALL_PREFIX -Recurse -Depth 3 |  
+            Select-Object -First 200  
   
       - name: Add Csound to environment  
         shell: pwsh  
         run: |  
-          $bin  = Join-Path $env:CSOUND_INSTALL_PREFIX "bin"  
-          $lib  = Join-Path $env:CSOUND_INSTALL_PREFIX "lib"  
+          $bin   = Join-Path $env:CSOUND_INSTALL_PREFIX "bin"  
+          $lib   = Join-Path $env:CSOUND_INSTALL_PREFIX "lib"  
           $lib64 = Join-Path $env:CSOUND_INSTALL_PREFIX "lib64"  
           Add-Content -Path $env:GITHUB_PATH -Value $bin  
           Add-Content -Path $env:GITHUB_ENV  -Value "PATH=$bin;$lib;$lib64;$env:PATH"  
@@ -127,28 +148,39 @@ jobs:
           $ErrorActionPreference = "Stop"  
           if (Test-Path "build-windows") { Remove-Item -Recurse -Force "build-windows" }  
           if (Test-Path "dist")          { Remove-Item -Recurse -Force "dist" }  
+  
           $csoundExe = @(  
             (Join-Path $env:CSOUND_INSTALL_PREFIX "bin\csound64.exe"),  
             (Join-Path $env:CSOUND_INSTALL_PREFIX "bin\csound.exe")  
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1  
+  
           $csoundLib = Get-ChildItem -Path $env:CSOUND_INSTALL_PREFIX -Recurse `  
             -Include @("csound64.lib","libcsound64.lib") -ErrorAction SilentlyContinue |  
             Select-Object -First 1  
           if (-not $csoundLib) {  
             throw "Could not find csound64.lib under $($env:CSOUND_INSTALL_PREFIX)"  
           }  
+  
           $vcpkg = Join-Path $env:GITHUB_WORKSPACE "csound-source\vcpkg_installed\x64-windows"  
-          $prefixPath = @($env:CSOUND_INSTALL_PREFIX)  
-          if (Test-Path $vcpkg) { $prefixPath += $vcpkg }  
-          cmake -S CsoundVST3 -B build-windows `  
-            -G "Visual Studio 17 2022" -A x64 `  
-            -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE/dist" `  
-            -DCMAKE_PREFIX_PATH="$(($prefixPath -join ';'))" `  
-            -DCSOUND_ROOT_HINT="$env:CSOUND_INSTALL_PREFIX" `  
-            -DCSOUND_EXECUTABLE="$csoundExe" `  
-            -DCSOUND_LIBRARY="$($csoundLib.FullName)" `  
-            -DCSOUND_LIBRARIES="$($csoundLib.FullName)"  
+          $prefixParts = @($env:CSOUND_INSTALL_PREFIX)  
+          if (Test-Path $vcpkg) { $prefixParts += $vcpkg }  
+          $prefixPath = $prefixParts -join ";"  
+  
+          $cmakeArgs = @(  
+            "-S", "CsoundVST3",  
+            "-B", "build-windows",  
+            "-G", "${{ steps.vs-gen.outputs.generator }}",  
+            "-A", "x64",  
+            "-DCMAKE_INSTALL_PREFIX=$env:GITHUB_WORKSPACE/dist",  
+            "-DCMAKE_PREFIX_PATH=$prefixPath",  
+            "-DCSOUND_ROOT_HINT=$env:CSOUND_INSTALL_PREFIX",  
+            "-DCSOUND_EXECUTABLE=$csoundExe",  
+            "-DCSOUND_LIBRARY=$($csoundLib.FullName)",  
+            "-DCSOUND_LIBRARIES=$($csoundLib.FullName)"  
+          )  
+          cmake @cmakeArgs  
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }  
+  
           cmake --build build-windows --config "${{ env.BUILD_TYPE }}" --parallel --target archive_dist  
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }  
   

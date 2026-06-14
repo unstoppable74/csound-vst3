@@ -37,80 +37,55 @@ jobs:
       CSOUND_INSTALL_PREFIX: ${{ github.workspace }}/.cache/csound-install
 
     steps:
-      # ─────────────────────────────────────────────
-      # 1. Checkout CsoundVST3
-      # ─────────────────────────────────────────────
+      # ── Step 1: Checkout ──
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # ─────────────────────────────────────────────
-      # 2. Detect Visual Studio version
-      #
-      #    windows-latest may be VS 2022 or VS 2026.
-      #    We probe with vswhere.exe to pick the right
-      #    CMake generator automatically.
-      # ─────────────────────────────────────────────
+      # ── Step 2: Detect VS ──
       - name: Detect Visual Studio generator
         id: detect-vs
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path $vswhere)) {
-            throw "vswhere.exe not found at $vswhere"
-          }
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found" }
           $installPath = & $vswhere -latest -property installationPath
           $version     = & $vswhere -latest -property catalog_productLineVersion
-          Write-Host "Visual Studio installation path: $installPath"
-          Write-Host "Visual Studio product line version: $version"
-
-          # Map product line version to CMake generator name
+          Write-Host "VS path: $installPath"
+          Write-Host "VS version: $version"
           switch ($version) {
             "2022" { $generator = "Visual Studio 17 2022" }
             "2026" { $generator = "Visual Studio 18 2026" }
-            default {
-              Write-Host "Unknown VS version '$version', trying VS 2026 generator as fallback."
-              $generator = "Visual Studio 18 2026"
-            }
+            default { $generator = "Visual Studio 18 2026" }
           }
-
-          Write-Host "Selected CMake generator: $generator"
+          Write-Host "Generator: $generator"
           "generator=$generator" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      # ─────────────────────────────────────────────
-      # 3. Install Windows build tools
-      # ─────────────────────────────────────────────
+      # ── Step 3: Install deps ──
       - name: Install Windows dependencies
         shell: pwsh
-        run: |
-          choco install -y winflexbison3 7zip
+        run: choco install -y winflexbison3 7zip
 
-      # ─────────────────────────────────────────────
-      # 4. Resolve Csound develop commit for cache key
-      # ─────────────────────────────────────────────
+      # ── Step 4: Csound commit SHA ──
       - name: Resolve Csound commit SHA
         id: csound-source
         shell: bash
         run: |
           set -euo pipefail
-          csound_sha="$(git ls-remote https://github.com/csound/csound.git \
-            "refs/heads/${CSOUND_VERSION_REF}" | awk '{print $1}')"
+          csound_sha="$(git ls-remote https://github.com/csound/csound.git "refs/heads/${CSOUND_VERSION_REF}" | awk '{print $1}')"
           if [[ -z "${csound_sha}" ]]; then
-            csound_sha="$(git ls-remote https://github.com/csound/csound.git \
-              "refs/tags/${CSOUND_VERSION_REF}" | awk '{print $1}')"
+            csound_sha="$(git ls-remote https://github.com/csound/csound.git "refs/tags/${CSOUND_VERSION_REF}" | awk '{print $1}')"
           fi
           if [[ -z "${csound_sha}" ]]; then
             echo "::error::Could not resolve Csound ref: ${CSOUND_VERSION_REF}"
             exit 1
           fi
           echo "sha=${csound_sha}" >> "${GITHUB_OUTPUT}"
-          echo "Csound ${CSOUND_VERSION_REF} → ${csound_sha}"
+          echo "Csound ${CSOUND_VERSION_REF} -> ${csound_sha}"
 
-      # ─────────────────────────────────────────────
-      # 5. Cache the Csound install directory
-      # ─────────────────────────────────────────────
+      # ── Step 5: Cache Csound ──
       - name: Cache Csound install
         id: cache-csound
         uses: actions/cache@v4
@@ -120,42 +95,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ env.CSOUND_CACHE_VERSION }}-
 
-      # ─────────────────────────────────────────────
-      # 6. Validate cached Csound install
-      # ─────────────────────────────────────────────
+      # ── Step 6: Validate cache ──
       - name: Validate Csound cache
         id: validate-csound-cache
         shell: pwsh
         run: |
           $P = $env:CSOUND_INSTALL_PREFIX
-          $exe = @(
-            (Join-Path $P "bin\csound64.exe"),
-            (Join-Path $P "bin\csound.exe")
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-          $lib = @(
-            (Join-Path $P "lib\csound64.lib"),
-            (Join-Path $P "lib64\csound64.lib"),
-            (Join-Path $P "lib\csound.lib")
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-          $dll = @(
-            (Join-Path $P "bin\csound64.dll")
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-          $ok = 0
-          if ($exe -and $lib -and $dll) { $ok = 1 }
+          $exe = @((Join-Path $P "bin\csound64.exe"), (Join-Path $P "bin\csound.exe")) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $lib = @((Join-Path $P "lib\csound64.lib"), (Join-Path $P "lib64\csound64.lib"), (Join-Path $P "lib\csound.lib")) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $dll = @((Join-Path $P "bin\csound64.dll")) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $ok = 0; if ($exe -and $lib -and $dll) { $ok = 1 }
           "valid=$ok" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          if ($ok -eq 1) { Write-Host "Csound cache valid."; & $exe --version }
+          else { Write-Host "Csound cache INVALID."; if (Test-Path $P) { Remove-Item -Recurse -Force $P } }
 
-          if ($ok -eq 1) {
-            Write-Host "Csound cache is valid."
-            & $exe --version
-          } else {
-            Write-Host "Csound cache is INVALID; will rebuild."
-            if (Test-Path $P) { Remove-Item -Recurse -Force $P }
-          }
-
-      # ─────────────────────────────────────────────
-      # 7. Checkout Csound source
-      # ─────────────────────────────────────────────
+      # ── Step 7: Checkout Csound source ──
       - name: Checkout Csound
         uses: actions/checkout@v4
         with:
@@ -164,113 +118,70 @@ jobs:
           path: csound-source
           submodules: recursive
 
-      # ─────────────────────────────────────────────
-      # 8. Build and install Csound (if cache miss)
-      #
-      #    Uses Csound's own vcpkg integration.
-      #    Passes the detected VS generator.
-      # ─────────────────────────────────────────────
-      - name: Build and install Csound - Windows
+      # ── Step 8: Build Csound (if cache miss) ──
+      - name: Build and install Csound
         if: steps.validate-csound-cache.outputs.valid != '1'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           Push-Location csound-source
-
           .\vcpkg\bootstrap-vcpkg.bat
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
           cmake -B build -S . `
-            -G "${{ steps.detect-vs.outputs.generator }}" `
-            -A x64 `
+            -G "${{ steps.detect-vs.outputs.generator }}" -A x64 `
             -DUSE_VCPKG=1 `
             -DCUSTOM_CMAKE="./platform/windows/Custom-vs.cmake" `
-            -DBUILD_TESTS=OFF `
-            -DBUILD_STATIC_LIBRARY=OFF `
-            -DBUILD_MULTI_CORE=ON `
-            -DBUILD_JAVA_INTERFACE=OFF `
-            -DBUILD_PYTHON_INTERFACE=OFF `
-            -DINSTALL_PYTHON_INTERFACE=OFF `
-            -DBUILD_PYTHON_OPCODES=OFF `
-            -DUSE_PYTHON=OFF `
-            -DUSE_DOUBLE=ON `
+            -DBUILD_TESTS=OFF -DBUILD_STATIC_LIBRARY=OFF -DBUILD_MULTI_CORE=ON `
+            -DBUILD_JAVA_INTERFACE=OFF -DBUILD_PYTHON_INTERFACE=OFF `
+            -DINSTALL_PYTHON_INTERFACE=OFF -DBUILD_PYTHON_OPCODES=OFF `
+            -DUSE_PYTHON=OFF -DUSE_DOUBLE=ON `
             -DCMAKE_INSTALL_PREFIX="$env:CSOUND_INSTALL_PREFIX"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
           cmake --build build --config Release --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
           cmake --install build --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
           Pop-Location
+          Get-ChildItem $env:CSOUND_INSTALL_PREFIX -Recurse -Depth 3 | Select-Object -First 200
 
-          Write-Host "`n=== Csound install tree ==="
-          Get-ChildItem -Path $env:CSOUND_INSTALL_PREFIX -Recurse -Depth 3 |
-            Select-Object -First 200 |
-            ForEach-Object { Write-Host "  $($_.FullName)" }
-
-      # ─────────────────────────────────────────────
-      # 9. Add Csound to PATH
-      # ─────────────────────────────────────────────
+      # ── Step 9: PATH ──
       - name: Add Csound to environment
         shell: pwsh
         run: |
-          $bin   = Join-Path $env:CSOUND_INSTALL_PREFIX "bin"
-          $lib   = Join-Path $env:CSOUND_INSTALL_PREFIX "lib"
+          $bin = Join-Path $env:CSOUND_INSTALL_PREFIX "bin"
+          $lib = Join-Path $env:CSOUND_INSTALL_PREFIX "lib"
           $lib64 = Join-Path $env:CSOUND_INSTALL_PREFIX "lib64"
           Add-Content -Path $env:GITHUB_PATH -Value $bin
           Add-Content -Path $env:GITHUB_ENV  -Value "PATH=$bin;$lib;$lib64;$env:PATH"
           Add-Content -Path $env:GITHUB_ENV  -Value "CSOUND_ROOT=$($env:CSOUND_INSTALL_PREFIX)"
 
-      # ─────────────────────────────────────────────
-      # 10. Configure CsoundVST3
-      #
-      #     Uses the auto-detected generator.
-      #     CSOUND_ROOT_HINT tells FindCsoundHomeFirst.cmake
-      #     where to look on Windows (search order:
-      #     CSOUND_ROOT_HINT → %USERPROFILE% → Program Files).
-      # ─────────────────────────────────────────────
+      # ── Step 10: Configure CsoundVST3 ──
       - name: Configure CsoundVST3
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
-          if (Test-Path build-windows)  { Remove-Item -Recurse -Force build-windows }
-          if (Test-Path dist)           { Remove-Item -Recurse -Force dist }
+          if (Test-Path build-windows) { Remove-Item -Recurse -Force build-windows }
+          if (Test-Path dist)          { Remove-Item -Recurse -Force dist }
 
           $csoundExe = @(
             (Join-Path $env:CSOUND_INSTALL_PREFIX "bin\csound64.exe"),
             (Join-Path $env:CSOUND_INSTALL_PREFIX "bin\csound.exe")
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $csoundExe) { throw "csound executable not found" }
 
-          if (-not $csoundExe) {
-            throw "Could not find csound executable under $($env:CSOUND_INSTALL_PREFIX)"
-          }
+          $csoundLib = Get-ChildItem -Path $env:CSOUND_INSTALL_PREFIX -Recurse -Include @("csound64.lib","libcsound64.lib") -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $csoundLib) { throw "csound64.lib not found" }
 
-          $csoundLib = Get-ChildItem -Path $env:CSOUND_INSTALL_PREFIX -Recurse -Include @(
-            "csound64.lib", "libcsound64.lib"
-          ) -ErrorAction SilentlyContinue | Select-Object -First 1
+          Write-Host "exe: $csoundExe"
+          Write-Host "lib: $($csoundLib.FullName)"
+          Write-Host "gen: ${{ steps.detect-vs.outputs.generator }}"
 
-          if (-not $csoundLib) {
-            throw "Could not find csound64.lib under $($env:CSOUND_INSTALL_PREFIX)"
-          }
-
-          Write-Host "Csound executable: $csoundExe"
-          Write-Host "Csound library:    $($csoundLib.FullName)"
-          Write-Host "CMake generator:   ${{ steps.detect-vs.outputs.generator }}"
-
-          # Build CMAKE_PREFIX_PATH including Csound's vcpkg deps
           $vcpkg = Join-Path $env:GITHUB_WORKSPACE "csound-source\vcpkg_installed\x64-windows"
           $prefixPath = @($env:CSOUND_INSTALL_PREFIX)
-          if (Test-Path $vcpkg) {
-            $prefixPath += $vcpkg
-            Write-Host "Adding vcpkg prefix: $vcpkg"
-          }
+          if (Test-Path $vcpkg) { $prefixPath += $vcpkg }
 
           cmake -S CsoundVST3 -B build-windows `
-            -G "${{ steps.detect-vs.outputs.generator }}" `
-            -A x64 `
+            -G "${{ steps.detect-vs.outputs.generator }}" -A x64 `
             -DCMAKE_INSTALL_PREFIX="$env:GITHUB_WORKSPACE\dist" `
             -DCMAKE_PREFIX_PATH="$(($prefixPath -join ';'))" `
             -DCSOUND_ROOT_HINT="$env:CSOUND_INSTALL_PREFIX" `
@@ -279,13 +190,17 @@ jobs:
             -DCSOUND_LIBRARIES="$($csoundLib.FullName)"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # ─────────────────────────────────────────────
-      # 11. Verify dist contents
-      #
-      #     CMakeLists.txt now handles DLL bundling via
-      #     install(FILES ...) rules. This step just
-      #     verifies the dist structure is correct.
-      # ─────────────────────────────────────────────
+      # ═══════════════════════════════════════════════
+      # Step 11: BUILD — this is the step that was missing!
+      # ═══════════════════════════════════════════════
+      - name: Build CsoundVST3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake --build build-windows --config "${{ env.BUILD_TYPE }}" --parallel --target archive_dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # ── Step 12: Verify dist ──
       - name: Verify dist contents
         shell: pwsh
         run: |
@@ -297,62 +212,16 @@ jobs:
               Write-Host ("  {0,-70} {1}" -f $rel, $size)
             }
           } else {
-            Write-Host "  (empty)"
-            Write-Error "dist directory is empty!"
+            Write-Error "dist directory is empty - build step likely failed silently"
             exit 1
           }
-
-          # Verify VST3 exists
           $vst3 = Get-ChildItem dist -Recurse -Filter "*.vst3" -ErrorAction SilentlyContinue
-          if (-not $vst3) {
-            Write-Error "No .vst3 file found in dist!"
-            exit 1
-          }
-          Write-Host "`nVST3 plugin: $($vst3.FullName)"
-
-          # Verify Standalone exists
+          if (-not $vst3) { Write-Error "No .vst3 file found!"; exit 1 }
+          Write-Host "`nVST3: $($vst3.FullName)"
           $exe = Get-ChildItem dist -Recurse -Filter "*.exe" -ErrorAction SilentlyContinue
-          if ($exe) {
-            Write-Host "Standalone:   $($exe.FullName)"
-          }
+          if ($exe) { Write-Host "EXE:  $($exe.FullName)" }
 
-          # Verify csound64.dll is present next to plugins
-          $csoundDll = Get-ChildItem dist -Recurse -Filter "csound64.dll" -ErrorAction SilentlyContinue
-          if ($csoundDll) {
-            Write-Host "`nCsound DLL locations:"
-            $csoundDll | ForEach-Object { Write-Host "  $($_.FullName)" }
-          } else {
-            Write-Warning "csound64.dll not found in dist - plugin may fail at runtime"
-          }
-
-          Write-Host "`n=== build archive ==="
-          Get-ChildItem build-windows -Filter "csound-vst3-*.zip" -ErrorAction SilentlyContinue |
-            ForEach-Object { Write-Host "  $($_.FullName) ($([math]::Round($_.Length / 1MB, 2)) MB)" }
-
-
-      # ─────────────────────────────────────────────
-      # 12. Verify dist contents
-      # ─────────────────────────────────────────────
-      - name: Verify dist contents
-        shell: pwsh
-        run: |
-          Write-Host "=== dist/ directory ==="
-          if (Test-Path dist) {
-            Get-ChildItem dist -Recurse | ForEach-Object {
-              $size = if ($_.PSIsContainer) { "<DIR>" } else { "$([math]::Round($_.Length / 1KB, 1)) KB" }
-              Write-Host ("  {0,-60} {1}" -f $_.FullName.Replace("$env:GITHUB_WORKSPACE\dist\", ""), $size)
-            }
-          } else {
-            Write-Host "  (empty)"
-          }
-
-          Write-Host "`n=== build archive ==="
-          Get-ChildItem build-windows -Filter "csound-vst3-*.zip" -ErrorAction SilentlyContinue |
-            ForEach-Object { Write-Host "  $($_.FullName) ($([math]::Round($_.Length / 1MB, 2)) MB)" }
-
-      # ─────────────────────────────────────────────
-      # 13. Upload artifacts
-      # ─────────────────────────────────────────────
+      # ── Step 13: Upload artifacts ──
       - name: Upload dist directory
         uses: actions/upload-artifact@v4
         with:
@@ -369,9 +238,6 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-      # ─────────────────────────────────────────────
-      # 14. Upload diagnostics on failure
-      # ─────────────────────────────────────────────
       - name: Upload build diagnostics
         if: failure()
         uses: actions/upload-artifact@v4

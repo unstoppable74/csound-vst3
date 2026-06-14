@@ -467,7 +467,8 @@ elseif(WIN32)
                         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                             "${_csound_dll}"
                             "$<TARGET_FILE_DIR:${_win_plugin_t}>"
-                        COMMENT "Copying $<PATH:FILE_NAME,${_csound_dll}> to ${_win_plugin_t} output"
+                        get_filename_component(_csound_dll_name "${_csound_dll}" NAME)
+                        COMMENT "Copying ${_csound_dll_name} to ${_win_plugin_t} output"
                         VERBATIM
                     )
                 endforeach()

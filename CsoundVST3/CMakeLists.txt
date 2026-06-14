@@ -398,6 +398,7 @@ install(TARGETS CsoundVST3
     COMPONENT CsoundVST3_Runtime
 )
 
+# ===== 修改段 1: install rules — all platforms =====
 if(APPLE)
     if(TARGET CsoundVST3_VST3)
         install(TARGETS CsoundVST3_VST3
@@ -421,7 +422,76 @@ if(APPLE)
             COMPONENT CsoundVST3_Runtime
         )
     endif()
+
+elseif(WIN32)
+    if(TARGET CsoundVST3_VST3)
+        install(TARGETS CsoundVST3_VST3
+            RUNTIME DESTINATION "VST3"
+            LIBRARY DESTINATION "VST3"
+            COMPONENT CsoundVST3_Runtime
+        )
+    endif()
+
+    if(TARGET CsoundVST3_Standalone)
+        install(TARGETS CsoundVST3_Standalone
+            RUNTIME DESTINATION "Standalone"
+            BUNDLE DESTINATION "Standalone"
+            COMPONENT CsoundVST3_Runtime
+        )
+    endif()
+
+    # Bundle Csound runtime DLLs next to each plugin/standalone.
+    if(CSOUND_EXECUTABLE)
+        get_filename_component(_csound_bin_dir "${CSOUND_EXECUTABLE}" DIRECTORY)
+        file(GLOB _csound_runtime_dlls "${_csound_bin_dir}/*.dll")
+        if(_csound_runtime_dlls)
+            foreach(_dll_dest IN ITEMS "VST3" "Standalone")
+                install(FILES ${_csound_runtime_dlls}
+                    DESTINATION "${_dll_dest}"
+                    COMPONENT CsoundVST3_Runtime
+                )
+            endforeach()
+            message(STATUS "Will install Csound DLLs to VST3/ and Standalone/ in dist")
+        endif()
+    endif()
+
+    # POST_BUILD: copy DLLs into build-tree output so the plugin
+    # can be tested directly from the build directory.
+    if(CSOUND_EXECUTABLE)
+        get_filename_component(_csound_bin_dir "${CSOUND_EXECUTABLE}" DIRECTORY)
+        file(GLOB _csound_runtime_dlls "${_csound_bin_dir}/*.dll")
+        foreach(_win_plugin_t IN ITEMS CsoundVST3_VST3 CsoundVST3_Standalone)
+            if(TARGET ${_win_plugin_t} AND _csound_runtime_dlls)
+                foreach(_csound_dll IN LISTS _csound_runtime_dlls)
+                    add_custom_command(TARGET ${_win_plugin_t} POST_BUILD
+                        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                            "${_csound_dll}"
+                            "$<TARGET_FILE_DIR:${_win_plugin_t}>"
+                        COMMENT "Copying $<PATH:FILE_NAME,${_csound_dll}> to ${_win_plugin_t} output"
+                        VERBATIM
+                    )
+                endforeach()
+            endif()
+        endforeach()
+    endif()
+
+else()
+    if(TARGET CsoundVST3_VST3)
+        install(TARGETS CsoundVST3_VST3
+            LIBRARY DESTINATION "VST3"
+            COMPONENT CsoundVST3_Runtime
+        )
+    endif()
+
+    if(TARGET CsoundVST3_Standalone)
+        install(TARGETS CsoundVST3_Standalone
+            RUNTIME DESTINATION "Standalone"
+            BUNDLE DESTINATION "Standalone"
+            COMPONENT CsoundVST3_Runtime
+        )
+    endif()
 endif()
+
 
 install(FILES
     "${CSOUND_VST3_REPOSITORY_ROOT}/README.md"
@@ -444,14 +514,18 @@ add_custom_target(clean_dist
 
 # macOS only: install copies .app/.vst3/.component from the build tree; they must be built first.
 # Depending only on CsoundVST3 can leave CsoundVST3_Standalone unbuilt and yield an empty Contents/MacOS/.
+# ===== 修改段 2: stage_dist deps — all platforms =====
 set(CSOUND_VST3_STAGE_DIST_DEPS clean_dist CsoundVST3)
 if(APPLE)
-    foreach(_stage_bundle_t IN ITEMS CsoundVST3_Standalone CsoundVST3_VST3 CsoundVST3_AU)
-        if(TARGET ${_stage_bundle_t})
-            list(APPEND CSOUND_VST3_STAGE_DIST_DEPS ${_stage_bundle_t})
-        endif()
-    endforeach()
+    set(_stage_plugin_targets CsoundVST3_Standalone CsoundVST3_VST3 CsoundVST3_AU)
+else()
+    set(_stage_plugin_targets CsoundVST3_Standalone CsoundVST3_VST3)
 endif()
+foreach(_stage_bundle_t IN LISTS _stage_plugin_targets)
+    if(TARGET ${_stage_bundle_t})
+        list(APPEND CSOUND_VST3_STAGE_DIST_DEPS ${_stage_bundle_t})
+    endif()
+endforeach()
 add_custom_target(stage_dist
     DEPENDS ${CSOUND_VST3_STAGE_DIST_DEPS}
     COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}" --prefix "${CSOUND_VST3_DIST_DIR}" --component CsoundVST3_Runtime --config "$<CONFIG>"
